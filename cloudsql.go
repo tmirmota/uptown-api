@@ -3,13 +3,15 @@ package main
 import (
 	"database/sql"
 	"encoding/json"
+	"log"
 	"net/http"
+	"fmt"
 	"os"
+	"reflect"
 
 	"google.golang.org/appengine"
 
-	"github.com/gorilla/mux"
-	_ "github.com/lib/pq"
+	_ "github.com/broady/gae-postgres"
 )
 
 var db *sql.DB
@@ -17,16 +19,18 @@ var db *sql.DB
 func main() {
 	datastoreName := os.Getenv("POSTGRES_CONNECTION")
 
+	fmt.Println(datastoreName)
+
 	var err error
-	db, err = sql.Open("postgres", datastoreName)
-	checkErr(err)
+	db, err = sql.Open("gae-postgres", datastoreName)
+	//	db, err = sql.Open("postgres", datastoreName)
+	if err != nil {
+		log.Fatal(err)
+	}
 
-	r := mux.NewRouter()
-
-	r.HandleFunc("/census-tract", censusTracts).Queries("swlng", "{swlng}", "swlat", "{swlat}", "nelng", "{nelng}", "nelat", "{nelat}")
-	r.HandleFunc("/property-tax", propertyTax).Queries("pcoord", "{pcoord}")
-
-	http.Handle("/", r)
+	http.HandleFunc("/", handle)
+	http.HandleFunc("/census-tract", censusTracts)
+	http.HandleFunc("/property-tax", propertyTax)
 
 	appengine.Main()
 }
@@ -35,6 +39,32 @@ func checkErr(err error) {
 	if err != nil {
 		panic(err)
 	}
+}
+
+type rental struct {
+	Price int
+}
+
+func handle(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path != "/" {
+		http.NotFound(w, r)
+		return
+	}
+	rows, err := db.Query("SELECT price FROM tbl_rentals LIMIT 50")
+	checkErr(err)
+
+	rentals := make([]rental, 0)
+
+	for rows.Next() {
+		rent := rental{}
+		err = rows.Scan(&rent.Price)
+		checkErr(err)
+		rentals = append(rentals, rent)
+	}
+
+	w.Header().Add("Access-Control-Allow-Origin", "*")
+	w.Header().Add("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(rentals)
 }
 
 type property struct {
@@ -58,7 +88,7 @@ type property struct {
 }
 
 func propertyTax(w http.ResponseWriter, r *http.Request) {
-	pcoord := mux.Vars(r)["pcoord"]
+	pcoord := r.URL.Query().Get("pcoord")
 
 	rows, err := db.Query(`
 		SELECT 
@@ -97,33 +127,120 @@ func propertyTax(w http.ResponseWriter, r *http.Request) {
 	}
 
 	data, _ := json.Marshal(properties)
+	w.Header().Add("Access-Control-Allow-Origin", "*")
 	w.Header().Add("Content-Type", "application/json")
 	w.Write(data)
 }
 
+// NullInt64 is an alias for sql.NullInt64 data type
+type NullInt64 sql.NullInt64
+
+// Scan implements the Scanner interface for NullInt64
+func (ni *NullInt64) Scan(value interface{}) error {
+	var i sql.NullInt64
+	if err := i.Scan(value); err != nil {
+		return err
+	}
+
+	// if nil then make Valid false
+	if reflect.TypeOf(value) == nil {
+		*ni = NullInt64{i.Int64, false}
+	} else {
+		*ni = NullInt64{i.Int64, true}
+	}
+	return nil
+}
+
+// NullString is an alias for sql.NullString data type
+type NullString sql.NullString
+
+// Scan implements the Scanner interface for NullString
+func (ns *NullString) Scan(value interface{}) error {
+	var s sql.NullString
+	if err := s.Scan(value); err != nil {
+		return err
+	}
+
+	// if nil then make Valid false
+	if reflect.TypeOf(value) == nil {
+		*ns = NullString{s.String, false}
+	} else {
+		*ns = NullString{s.String, true}
+	}
+
+	return nil
+}
+
+// MarshalJSON for NullInt64
+func (ni *NullInt64) MarshalJSON() ([]byte, error) {
+	if !ni.Valid {
+		return []byte("null"), nil
+	}
+	return json.Marshal(ni.Int64)
+}
+
+// UnmarshalJSON for NullInt64
+func (ni *NullInt64) UnmarshalJSON(b []byte) error {
+	err := json.Unmarshal(b, &ni.Int64)
+	ni.Valid = (err == nil)
+	return err
+}
+
+// MarshalJSON for NullString
+func (ns *NullString) MarshalJSON() ([]byte, error) {
+	if !ns.Valid {
+		return []byte("null"), nil
+	}
+	return json.Marshal(ns.String)
+}
+
+// UnmarshalJSON for NullString
+func (ns *NullString) UnmarshalJSON(b []byte) error {
+	err := json.Unmarshal(b, &ns.String)
+	ns.Valid = (err == nil)
+	return err
+}
+
 type censusTract struct {
-	CTUID           string `json:"ctuid"`
-	NumberOfRentals int    `json:"number_of_rentals"`
-	AveragePrice    int    `json:"average_price"`
+	CTUID           string     `json:"ctuid"`
+	NumberOfRentals int        `json:"number_of_rentals"`
+	AveragePrice    int        `json:"average_price"`
+	MedianPrice		int 		`json:"median_price"`
+	MinPrice        NullInt64  `json:"min_price"`
+	MaxPrice        int        `json:"max_price"`
+	AverageSqFt     NullInt64  `json:"average_sqft"`
+	AverageBed      NullString `json:"average_bed"`
+	AverageBath     NullString `json:"average_bath"`
 }
 
 func censusTracts(w http.ResponseWriter, r *http.Request) {
-	vars := mux.Vars(r)
+	queries := r.URL.Query()
+	bedrooms := queries.Get("bedrooms")
 
-	rows, err := db.Query(`
+	q := fmt.Sprintf(`
 		SELECT
-  			ctuid,
-  			count(*) as number_of_rentals,
-  			round(AVG(price)) as average_price
+		  ctuid,
+		  count(*) as number_of_rentals,
+		  round(AVG(NULLIF(price,0))) as average_price,
+		  round(percentile_cont(0.5) WITHIN GROUP (ORDER BY price)) AS median_price,
+		  round(percentile_cont(0.1) WITHIN GROUP (ORDER BY price)) AS min_price,
+		  round(percentile_cont(0.9) WITHIN GROUP (ORDER BY price)) AS max_price,
+		  round(AVG(NULLIF(sqft,0))) as average_sqft,
+		  round(AVG(NULLIF(bedrooms, 0)),2) as average_bed,
+		  round(AVG(NULLIF(bathrooms,0)),2) as average_bath
 		FROM (
   			SELECT r.*, ct.ctuid
   			FROM tbl_rentals r INNER JOIN tbl_census_tracts ct
-      		ON ST_Contains(ct.wkb_geometry,r.wkb_geometry)
-         		AND st_contains(
-         			ST_MakeEnvelope($1,$2,$3,$4, 4326), 
-         			ct.wkb_geometry
-         			)
-				) as ctr GROUP BY ctuid`, vars["swlng"], vars["swlat"], vars["nelng"], vars["nelat"])
+      		ON ST_Intersects(ct.wkb_geometry,r.wkb_geometry)
+         	AND ST_Intersects(
+         				ST_MakeEnvelope($1,$2,$3,$4, 4326), 
+								ct.wkb_geometry
+							)
+			AND r.bedrooms IN (%v)
+		) as ctr GROUP BY ctuid`, bedrooms)
+
+
+	rows, err := db.Query(q, queries.Get("swlng"), queries.Get("swlat"), queries.Get("nelng"), queries.Get("nelat"))
 	checkErr(err)
 
 	defer rows.Close()
@@ -133,13 +250,14 @@ func censusTracts(w http.ResponseWriter, r *http.Request) {
 	for rows.Next() {
 		ct := censusTract{}
 
-		err = rows.Scan(&ct.CTUID, &ct.NumberOfRentals, &ct.AveragePrice)
+		err = rows.Scan(&ct.CTUID, &ct.NumberOfRentals, &ct.AveragePrice, &ct.MedianPrice, &ct.MinPrice, &ct.MaxPrice, &ct.AverageSqFt, &ct.AverageBed, &ct.AverageBath)
 		checkErr(err)
 
 		cts = append(cts, ct)
 	}
 
 	data, _ := json.Marshal(cts)
+	w.Header().Add("Access-Control-Allow-Origin", "*")
 	w.Header().Add("Content-Type", "application/json")
 	w.Write(data)
 }
