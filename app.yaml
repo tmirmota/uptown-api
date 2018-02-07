@@ -6,8 +6,8 @@ handlers:
   script: _go_app
 
 env_variables:
-  POSTGRES_CONNECTION: "cloudsql='reda-188106:us-central1:uptown' user=postgres password='C0AcD8dBOri7ust9' dbname=geometric"
-
+#  POSTGRES_CONNECTION: "cloudsql='reda-188106:us-central1:uptown' user=postgres password='C0AcD8dBOri7ust9' dbname=geometric"
+  POSTGRES_CONNECTION="user=postgres password=C0AcD8dBOri7ust9 dbname=geometric sslmode=disable"
 
 #env: flex
 #
