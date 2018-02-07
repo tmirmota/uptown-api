@@ -10,7 +10,7 @@ import (
 	"reflect"
 
 	"google.golang.org/appengine"
-	_ "github.com/broady/gae-postgres"
+	_ "github.com/lib/pq"
 )
 
 var db *sql.DB
@@ -20,8 +20,10 @@ func main() {
 	fmt.Println(datastoreName)
 
 	var err error
-	db, err = sql.Open("gae-postgres", datastoreName)
-	//db, err = sql.Open("postgres", datastoreName)
+	// driver for deploy GAE on standard
+	//db, err = sql.Open("gae-postgres", datastoreName)
+
+	db, err = sql.Open("postgres", datastoreName)
 	if err != nil {
 		log.Fatal(err)
 	}
